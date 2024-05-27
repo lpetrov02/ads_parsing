@@ -3,15 +3,22 @@ import torch
 import re
 import json
 from enum import Enum
+from collections import defaultdict
 
 from transformers import TrainerCallback
 import evaluate
 
 from utils import Format
 
+import nltk
+nltk.download('punkt')
+from nltk.tokenize import word_tokenize
+from nltk.stem import PorterStemmer
+
 
 def get_parser(tokenizer, format=Format.SpecTokens):
     def spec_tokens_parser(sequence):
+        sequence = re.sub(tokenizer.pad_token, "", sequence)
         opening = ["<BOT>", "<BOP>", "<BOC1>", "<BOC2>"]
         closing = ["<EOT>", "<EOP>", "<EOC1>", "<EOC2>"]
         names = ["title", "price", "currency", "count"]
@@ -20,6 +27,8 @@ def get_parser(tokenizer, format=Format.SpecTokens):
         eos_index = sequence.find(tokenizer.eos_token)
         if eos_index >= 0:
             sequence = sequence[:eos_index]
+        for spec_token in opening + closing + ["<BOB>", "<EOB>"]:
+            sequence = re.sub(spec_token, f" {spec_token} ", sequence).strip()
         sequence = list(sequence.split())
 
         def parse_bundle(sub_sequence):
@@ -78,6 +87,42 @@ def get_parser(tokenizer, format=Format.SpecTokens):
             return False, None
         return True, bundles
     
+    def light_tokens_parser(sequence):
+        spec_tokens = ["<BOT>", "<BOP>", "<BOC1>", "<BOC2>"]
+        names = ["title", "price", "currency", "count"]
+        tok2name = dict(zip(spec_tokens, names))
+
+        eos_index = sequence.find(tokenizer.eos_token)
+        if eos_index >= 0:
+            sequence = sequence[:eos_index]
+        sequence = sequence.strip()
+        if re.match(r'^[0-9]+', sequence) is None:
+            return False, None
+        sequence = re.sub(r'^[0-9]+', '', sequence)
+        if len(sequence) > 0 and re.match(r'^<BOB>', sequence) is None:
+            return False, None
+        sequence = re.sub(r'^<BOB>', '', sequence)
+
+        bundles = []
+        for bundle in sequence.split('<BOB>'):
+            bundle = bundle.strip()
+            if len(bundle) == 0:
+                continue
+            if re.match(r'^[0-9]+', bundle) is None:
+                return False, None
+            bundle = re.sub(r'^[0-9]+(\s*)', '', bundle)
+            for tok in spec_tokens:
+                if bundle.count(tok) > 1:
+                    return False, None
+            inds = sorted([(tok, bundle.index(tok)) for tok in spec_tokens if tok in bundle], key=lambda x: x[1])
+            if len(inds) > 0 and inds[0][1] != 0:
+                return False, None
+            bundle_dict = {}
+            for i, (tok, ind) in enumerate(inds):
+                bundle_dict[tok2name[tok]] = bundle[ind + len(tok): inds[i + 1][1]] if i < len(inds) - 1 else bundle[ind + len(tok):]
+            bundles.append(bundle_dict)
+        return True, bundles
+
     def just_json_parser(sequence):
         eos_index = sequence.find(tokenizer.eos_token)
         if eos_index >= 0:
@@ -96,8 +141,20 @@ def get_parser(tokenizer, format=Format.SpecTokens):
 
     if format == Format.SpecTokens:
         return spec_tokens_parser
+    
+    elif format == Format.LightTokens:
+        return light_tokens_parser
+
+    elif format == Format.WithNumber:
+        def parser_with_number(sequence):
+            sequence = re.sub(tokenizer.pad_token, "", sequence)
+            sequence = re.sub(r'<BON>(\s*)[0-9]+(\s*)/(\s*)[0-9]+(\s*)<EON>', '', sequence)
+            return spec_tokens_parser(sequence)
+        return parser_with_number
+
     elif format == Format.JustJson:
         return just_json_parser
+
     else:
         raise ValueError(f"Not supportef format: {format}")
 
@@ -106,14 +163,12 @@ def is_valid_bundle(bundle):
     return "title" in bundle and "price" in bundle and "currency" in bundle and "count" in bundle        
 
 
-def reorder_bundles(predicted_bundles, target_bundles):
+def reorder_bundles(predicted_bundles, target_bundles, scorer, key):
     defaults = {"title": "", "price": "-1", "currency": "", "count": ""}
     min_common_bundles = min(len(predicted_bundles), len(target_bundles))
-    # bleu_score = evaluate.load("sacrebleu")
-    chrf_score = evaluate.load("chrf")
 
     scores = np.array([
-        [chrf_score.compute(predictions=[pred_bundle.get("title", "")], references=[target_bundle["title"]])["score"]
+        [scorer.compute(predictions=[pred_bundle.get("title", "")], references=[target_bundle["title"]])[key]
             for target_bundle in target_bundles] for pred_bundle in predicted_bundles
     ])
     
@@ -129,29 +184,111 @@ def reorder_bundles(predicted_bundles, target_bundles):
     return preds, targets
 
 
+def preprocess_text(text):
+    punctuation = ",.!?#-+_=<>\"'"
+    stemmer = PorterStemmer()
+    
+    tokens = [stemmer.stem(word.strip().strip(punctuation)).lower() for word in word_tokenize(text)]
+    return " ".join(tokens)
+
+
+def titles_multiple_precision_recall_f(preds, targets):
+    def titles_precision_recall_f(pred, target):
+        pred_set = set(list(pred.split()))
+        target_set = set(list(target.split()))
+        TP = len(pred_set & target_set)
+        FP = len(pred_set - target_set)
+        FN = len(target_set - pred_set)
+        precision, recall = TP / ((TP + FP) or 1), TP / ((TP + FN) or 1)
+        return precision, recall, 2 * precision * recall / ((precision + recall) or 1)
+
+    metrics = {"precision": [], "recall": [], "f1": []}
+    for pred, target in zip(preds, targets):
+        p, r, f = titles_precision_recall_f(pred, target)
+        metrics["precision"].append(p)
+        metrics["recall"].append(r)
+        metrics["f1"].append(f)
+    return metrics
+
+
+def count_title_metrics(preds, targets, scorers, keys):
+    assert len(preds) == len(targets)
+    metrics = titles_multiple_precision_recall_f(preds, targets)
+    metrics["exact_match"] = [int(pred == target) for pred, target in zip(preds, targets)]
+
+    for name in scorers:
+        instances = [scorers[name].compute(predictions=[pred], references=[target]) for pred, target in zip(preds, targets)]
+        for key in keys.get(name, ["score"]):
+            metrics[f"{name}_{key}"] = [instance[key] for instance in instances]
+    return metrics
+
+
+def compare_currency(pred, target):
+    groups = {
+        "lari": ("lari", "лари", "лар", "gel", "₾",),
+        "rub": ("р", "руб", "рубли", "рублей", "rub", "₽",),
+        "eur": ("е", "евро", "eur", "euro", "€",),
+        "usd": ("доллар", "долларов", "доллары", "usd", "$",),
+    }
+    pred, target = pred.lower().strip(".,"), target.lower().strip(".,")
+    if pred == target:
+        return True
+    for curr_name in groups:
+        if pred in groups[curr_name] and target in groups[curr_name]:
+            return True
+    return False
+    
+
+def count_other_metrics(preds, targets):
+    assert len(preds) == len(targets)
+    metrics = {
+        "price_match": [int(pred["price"] == target["price"]) for pred, target in zip(preds, targets)],
+        "currency_match": [int(compare_currency(pred["currency"], target["currency"])) for pred, target in zip(preds, targets)],
+        "count_match": [int(pred["count"].lower() == target["count"].lower()) for pred, target in zip(preds, targets)],
+    }
+    return metrics
+
+
+def count_bundle_metrics(preds, targets, title_scorers, title_keys):
+    assert len(preds) == len(targets)
+    n_pairs = len(preds)
+    metrics = count_title_metrics([pred.get("title") for pred in preds], [target.get("title") for target in targets], title_scorers, title_keys)
+    metrics.update(count_other_metrics(preds, targets))
+    metrics["match"] = []
+    for i in range(n_pairs):
+        metrics["match"].append(metrics["price_match"][i] * metrics["currency_match"][i] * metrics["count_match"][i] * metrics["f1"][i])
+    return {key: np.sum(val) if val else 0 for key, val in metrics.items()}
+
+
+def deduplicate(bundles):
+    fields = ("title", "price", "currency", "count")
+    tuples = [tuple([bundle.get(col) for col in fields]) for bundle in bundles]
+    tuples = list(set(tuples))
+    dedup_bundles = [{col: tup[i] for i, col in enumerate(fields) if tup[i] is not None} for tup in tuples]
+    return dedup_bundles, len(bundles) - len(dedup_bundles)
+
+    
 def compute_metrics(decoded_preds, decoded_targets, parser):
     metrics = {}
-    bleu_score = evaluate.load("sacrebleu")
-    chrf_score = evaluate.load("chrf")
+    
+    title_scorers = {
+        "bleu": evaluate.load("sacrebleu"),
+        "chrf": evaluate.load("chrf"),
+    }
+    title_scorer_keys = {
+    }
 
-    bleu = bleu_score.compute(predictions=decoded_preds, references=decoded_targets)
-    metrics["Global BLEU"] = bleu["score"]
-
+    duplicates_count = 0
     valid_prediction_structures = 0
     valid_bundles_count, bundles_count = 0, 0
     n_bundles_error, over_bundles, under_bundles = 0, 0, 0
     one_bundle_count, multi_bundle_count = 0, 0
-    one_bundle_title_bleu, multi_bundle_title_bleu = 0, 0
-    one_bundle_title_chrf, multi_bundle_title_chrf = 0, 0
-    one_bundle_price_match, multi_bundle_price_match = 0, 0
-    one_bundle_currency_match, multi_bundle_currency_match = 0, 0
-    one_bundle_count_match, multi_bundle_count_match = 0, 0
+    one_bundle_metrics = defaultdict(float)
+    multi_bundle_metrics = defaultdict(float)
     skipped = 0
     for pred, target in zip(decoded_preds, decoded_targets):
         pred = re.sub(r'(</s>)+', '</s>', pred)
         target = re.sub(r'(</s>)+', '</s>', target)
-        # print("T", target)
-        # print("P", pred)
         target_is_valid, target_bundles = parser(target)
         prediction_is_valid, pred_bundles = parser(pred)
         
@@ -161,65 +298,72 @@ def compute_metrics(decoded_preds, decoded_targets, parser):
 
         valid_prediction_structures += int(prediction_is_valid)
         if prediction_is_valid:
+            # preprocess titles
+            for i in range(len(pred_bundles)):
+                if "title" in pred_bundles[i]:
+                    pred_bundles[i]["title"] = preprocess_text(pred_bundles[i]["title"])
+            for i in range(len(target_bundles)):
+                if "title" in target_bundles[i]:
+                    target_bundles[i]["title"] = preprocess_text(target_bundles[i]["title"])
+            
+            # remove duplicates
+            pred_bundles, n_duplicates = deduplicate(pred_bundles)
+            duplicates_count += n_duplicates
+            
+            #count bundles
             bundles_count += len(pred_bundles)
             valid_bundles_count += sum(is_valid_bundle(bundle) for bundle in pred_bundles)
             n_bundles_error += abs(len(pred_bundles) - len(target_bundles))
             over_bundles += max(len(pred_bundles) - len(target_bundles), 0)
             under_bundles += max(len(target_bundles) - len(pred_bundles), 0)
 
-            pred_bundles, target_bundles = reorder_bundles(pred_bundles, target_bundles)
+            # reorder_bundles
+            original_gt_length = len(target_bundles)
+            pred_bundles, target_bundles = reorder_bundles(pred_bundles, target_bundles, title_scorers["chrf"], "score")
 
-            if len(target_bundles) == 0:
-                continue
-            elif len(target_bundles) == 1:
+            if original_gt_length == 1:
                 one_bundle_count += 1
-                one_bundle_title_bleu += bleu_score.compute(predictions=[pred_bundles[0]["title"]],
-                                                            references=[target_bundles[0]["title"]])["score"]
-                one_bundle_title_chrf += chrf_score.compute(predictions=[pred_bundles[0]["title"]],
-                                                            references=[target_bundles[0]["title"]])["score"]
-                one_bundle_price_match += int(pred_bundles[0]["price"] == target_bundles[0]["price"])
-                one_bundle_currency_match += int(pred_bundles[0]["currency"] == target_bundles[0]["currency"])
-                one_bundle_count_match += int(pred_bundles[0]["count"] == target_bundles[0]["count"])       
-            else:
+            elif original_gt_length > 1:
                 multi_bundle_count += 1
-                multi_bundle_title_bleu += np.mean([bleu_score.compute(predictions=[pred_bundle["title"]], references=[target_bundle["title"]])["score"]
-                                                        for pred_bundle, target_bundle in zip(pred_bundles, target_bundles)])
-                multi_bundle_title_chrf += np.mean([chrf_score.compute(predictions=[pred_bundle["title"]], references=[target_bundle["title"]])["score"]
-                                                        for pred_bundle, target_bundle in zip(pred_bundles, target_bundles)])
-                multi_bundle_price_match += sum(pred_bundle["price"] == target_bundle["price"] for pred_bundle, target_bundle in zip(pred_bundles, target_bundles)) / \
-                    len(target_bundles)
-                multi_bundle_currency_match += sum(pred_bundle["currency"] == target_bundle["currency"] for pred_bundle, target_bundle in zip(pred_bundles, target_bundles)) / \
-                    len(target_bundles)
-                multi_bundle_count_match += sum(pred_bundle["count"] == target_bundle["count"] for pred_bundle, target_bundle in zip(pred_bundles, target_bundles)) / \
-                    len(target_bundles)
+
+            ad_metrics = count_bundle_metrics(pred_bundles, target_bundles, title_scorers, title_scorer_keys)
+            if original_gt_length == 0:
+                continue
+            
+            if original_gt_length == 1:
+                for key in ad_metrics:
+                    one_bundle_metrics[key] += ad_metrics[key] 
+            else:
+                for key in ad_metrics:
+                    multi_bundle_metrics[key] += ad_metrics[key] / original_gt_length
 
     metrics["valid_answer_structure_precent"] = valid_prediction_structures / ((len(decoded_preds) - skipped) or 1) * 100
+    metrics["mean_duplicates"] = duplicates_count / (valid_prediction_structures or 1)
     metrics["valid_bundles_precent"] = valid_bundles_count / (bundles_count or 1) * 100
     metrics["n_bundles_mae"] = n_bundles_error / (valid_prediction_structures or 1)
     metrics["mean_over_bundles"] = over_bundles / (valid_prediction_structures or 1)
     metrics["mean_under_bundles"] = under_bundles / (valid_prediction_structures or 1)
+    
+    for key in one_bundle_metrics:
+        metrics[f"1b_{key}"] = one_bundle_metrics[key] / (one_bundle_count or 1)
 
-    metrics["title_bleu_1_bundle"] = one_bundle_title_bleu / (one_bundle_count or 1)
-    metrics["title_chrf_1_bundle"] = one_bundle_title_chrf / (one_bundle_count or 1)
-    metrics["price_match_precent_1_bundle"] = one_bundle_price_match / (one_bundle_count or 1) * 100
-    metrics["currency_match_precent_1_bundle"] = one_bundle_currency_match / (one_bundle_count or 1) * 100
-    metrics["count_match_precent_1_bundle"] = one_bundle_count_match / (one_bundle_count or 1) * 100
-
-    metrics["title_bleu_multi_bundle"] = multi_bundle_title_bleu / (multi_bundle_count or 1)
-    metrics["title_chrf_multi_bundle"] = multi_bundle_title_chrf / (multi_bundle_count or 1)
-    metrics["price_match_precent_multi_bundle"] = multi_bundle_price_match / (multi_bundle_count or 1) * 100
-    metrics["currency_match_precent_multi_bundle"] = multi_bundle_currency_match / (multi_bundle_count or 1) * 100
-    metrics["count_match_precent_multi_bundle"] = multi_bundle_count_match / (multi_bundle_count or 1) * 100
+    for key in multi_bundle_metrics:
+        metrics[f"mb_{key}"] = multi_bundle_metrics[key] / (multi_bundle_count or 1)
     return metrics
 
 
 def compute_test_metrics(decoded_preds, decoded_targets, parser):
     metrics = {}
-    bleu_score = evaluate.load("sacrebleu")
-    chrf_score = evaluate.load("chrf")
+    title_scorers = {
+        "bleu": evaluate.load("sacrebleu"),
+        "chrf": evaluate.load("chrf"),
+    }
+    title_scorer_keys = {
+        "rouge": ["rouge1", "rouge2", "rougeL"],
+    }
     
     pred, target = decoded_preds[0], decoded_targets[0]
-
+    
     pred = re.sub(r'(</s>)+', '</s>', pred)
     target = re.sub(r'(</s>)+', '</s>', target)
     target_is_valid, target_bundles = parser(target)
@@ -230,23 +374,32 @@ def compute_test_metrics(decoded_preds, decoded_targets, parser):
 
     metrics["valid_structure"] = prediction_is_valid
     if prediction_is_valid:
+        # preprocess titles
+        for i in range(len(pred_bundles)):
+            if "title" in pred_bundles[i]:
+                pred_bundles[i]["title"] = preprocess_text(pred_bundles[i]["title"])
+        for i in range(len(target_bundles)):
+            if "title" in target_bundles[i]:
+                target_bundles[i]["title"] = preprocess_text(target_bundles[i]["title"])
+                
+        # remove duplicates
+        pred_bundles, n_duplicates = deduplicate(pred_bundles)
+        metrics["n_duplicates"] = n_duplicates
+        
+        # count bundles
         metrics["pred_n_bundles"] = len(pred_bundles)
         metrics["valid_bundles"] = sum(is_valid_bundle(bundle) for bundle in pred_bundles)
         metrics["delta_bundles"] = len(pred_bundles) - len(target_bundles)
 
-        pred_bundles, target_bundles = reorder_bundles(pred_bundles, target_bundles)
+        original_gt_length = len(target_bundles)
+        pred_bundles, target_bundles = reorder_bundles(pred_bundles, target_bundles, title_scorers["chrf"], "score")
 
-        if len(target_bundles) == 0:
+        ad_metrics = count_bundle_metrics(pred_bundles, target_bundles, title_scorers, title_scorer_keys)
+        if original_gt_length == 0:
             return metrics
-        metrics["mean_bleu"] = np.mean([bleu_score.compute(predictions=[pred_bundle["title"]], references=[target_bundle["title"]])["score"]
-                                        for pred_bundle, target_bundle in zip(pred_bundles, target_bundles)])
-        metrics["mean_chrf"] = np.mean([chrf_score.compute(predictions=[pred_bundle["title"]], references=[target_bundle["title"]])["score"]
-                                        for pred_bundle, target_bundle in zip(pred_bundles, target_bundles)])
-        metrics["mean_price_match"] = sum(pred_bundle["price"] == target_bundle["price"] for pred_bundle, target_bundle in zip(pred_bundles, target_bundles))                                                                 / len(target_bundles)
-        metrics["mean_currency_match"] = sum(pred_bundle["currency"] == target_bundle["currency"] for pred_bundle, target_bundle in zip(pred_bundles, target_bundles)) \
-                                             / len(target_bundles)
-        metrics["mean_count_match"] = sum(pred_bundle["count"] == target_bundle["count"] for pred_bundle, target_bundle in zip(pred_bundles, target_bundles)) \
-                                          / len(target_bundles)
+        
+        for key in ad_metrics:
+            metrics[key] = ad_metrics[key] / original_gt_length
     return metrics
 
 

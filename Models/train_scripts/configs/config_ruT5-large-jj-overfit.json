@@ -1,20 +1,21 @@
 {
-    "format": "SpecTokens",
+    "format": "JustJson",
     "max_bundles": 5,
     "max_eval_size": 100,
-    "model": "cointegrated/ruT5-base",
+    "model": "ai-forever/ruT5-large",
     "add_nl_token": false,
     "add_eos_token": false,
     "change_pad_to_eos": false,
     "shuffle_bundles": true,
-    "save_folder": "m-ruT5-base",
+    "save_folder": "ruT5-large-JJ-overfit",
     "train": {
         "n_epochs": 10,
         "lr": 0.00005,
-        "batch_size": 16,
+        "batch_size": 8,
         "weight_decay": 0.01,
         "scheduler": "cosine",
-        "warmup_steps": 500
+        "warmup_steps": 500,
+        "fp16": true
     },
     "eval": {
         "batch_size": 8,

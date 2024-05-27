@@ -16,6 +16,7 @@ from transformers import AutoModelForCausalLM, Seq2SeqTrainingArguments, Seq2Seq
 from peft import LoraConfig, get_peft_model
 
 import sys
+sys.path.append("..")
 from eval_utils import get_metrics_computer, PrintCallback
 from utils import get_preprocessor, Format, ShuffleCollator, count_parameters
 
@@ -23,19 +24,32 @@ from utils import get_preprocessor, Format, ShuffleCollator, count_parameters
 device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 print(device)
 
-with open("configs/config.json", "rb") as config:
+with open("configs/config_fredT5-xl-st.json", "rb") as config:
     params = json.load(config)
+print(params)
 
-out_format = Format.SpecTokens if params["format"] == "SpecTokens" else Format.JustJson
+out_format = Format(params["format"])
 
 print("\nData...")
-train_data = pd.read_csv("~/work/resources/data/ads_train.csv")
+train_data = pd.read_csv("~/data/ads_train.csv")
 train_data = train_data[train_data["n_bundles"] <= params.get("max_bundles", np.inf)]
+if "singles_to_mults_ratio" in params:
+    singles = train_data[train_data["n_bundles"] == 1]
+    mults = train_data[train_data["n_bundles"] != 1]
+    print(f"Singles: {len(singles)}; mults: {len(mults)}")
+    k = params["singles_to_mults_ratio"]
+    if k * len(mults) > len(singles):
+        train_data = pd.concat([singles, mults.sample(frac=len(singles) / (k * len(mults)))]).sample(frac=1)
+    else:
+        if params.get("shuffle_bundles", False) and len(singles) <= 2 * k * len(mults):
+            train_data = pd.concat([singles, mults.sample(frac=len(singles) / (k * len(mults)), replace=True)]).sample(frac=1)
+        else:
+            train_data = pd.concat([singles.sample(frac=k * len(mults) / len(singles)), mults]).sample(frac=1)
 train_data.set_index(np.arange(len(train_data)), inplace=True)
 print(f"We have train datset of size {len(train_data)}")
 
-eval_data = pd.read_csv("~/work/resources/data/ads_eval.csv")
-eval_data = eval_data[:params.get("max_eval_size", len(eval_data))]
+eval_data = pd.read_csv("~/data/ads_eval.csv")
+eval_data = eval_data.sample(n=params.get("max_eval_size", len(eval_data)))
 eval_data.set_index(np.arange(len(eval_data)), inplace=True)
 print(f"We have eval datset of size {len(eval_data)}")
 
@@ -56,7 +70,7 @@ model.resize_token_embeddings(len(tokenizer))
 print("\nDataset...")
 train_dataset = Dataset.from_pandas(train_data[["Text", "bundles"]])
 train_ads = train_dataset.map(
-    get_preprocessor(tokenizer, out_format, params.get("add_eos_token", False)),
+    get_preprocessor(tokenizer, out_format, params.get("clean_text", False)),
     batched=True,
     num_proc=4,
     remove_columns=train_dataset.column_names
@@ -65,7 +79,7 @@ train_ads = train_ads.flatten()
 
 eval_dataset = Dataset.from_pandas(eval_data[["Text", "bundles"]])
 eval_ads = eval_dataset.map(
-    get_preprocessor(tokenizer, out_format),
+    get_preprocessor(tokenizer, out_format, params.get("clean_text", False)),
     batched=True,
     num_proc=4,
     remove_columns=eval_dataset.column_names
@@ -74,7 +88,13 @@ eval_ads = eval_ads.flatten()
 
 if params.get("change_pad_to_eos", False):
     tokenizer.pad_token = tokenizer.eos_token
-data_collator = ShuffleCollator(tokenizer, out_format, params.get("add_eos_token", False), params.get("shuffle_bundles", False))
+data_collator = ShuffleCollator(
+    tokenizer,
+    out_format,
+    params.get("add_eos_token", False),
+    params.get("add_lm_token", False),
+    params.get("shuffle_bundles", False),
+)
 
 print("\nTrainer & Training...")
 train_params = params["train"]
@@ -129,6 +149,6 @@ trainer.train()
 
 if lora_rank is not None:
     model = model.merge_and_unload()
-output_dir = f"../good_checkpoints/{params["save_folder"]}"
+output_dir = f"../good_checkpoints/{params['save_folder']}"
 model.save_pretrained(output_dir)
 tokenizer.save_pretrained(output_dir)

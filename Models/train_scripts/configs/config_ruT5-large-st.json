@@ -1,10 +1,11 @@
 {
     "format": "SpecTokens",
     "max_bundles": 5,
+    "max_eval_size": 100,
     "model": "ai-forever/ruT5-large",
     "add_nl_token": false,
     "add_eos_token": false,
-    "change_pad_to_eos": true,
+    "change_pad_to_eos": false,
     "shuffle_bundles": true,
     "save_folder": "ruT5-large",
     "train": {
