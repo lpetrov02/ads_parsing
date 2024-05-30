@@ -1,6 +1,7 @@
 {
-    "format": "SpecTokens",
+    "format": "LightTokens",
     "max_bundles": 10,
+    "singles_to_mults_ratio": 2,
     "max_eval_size": 100,
     "model": "ai-forever/FRED-T5-1.7B",
     "add_nl_token": false,
@@ -9,7 +10,7 @@
     "change_pad_to_eos": false,
     "shuffle_bundles": true,
     "clean_text": true,
-    "save_folder": "fredT5-xl-st",
+    "save_folder": "fredT5-xl-lt",
     "train": {
         "n_epochs": 10,
         "lr": 3e-04,

@@ -11,12 +11,7 @@ nltk.download('punkt')
 from nltk.tokenize import wordpunct_tokenize
 from nltk.stem import PorterStemmer
 
-
-class Format(Enum):
-    SpecTokens = "SpecTokens"
-    JustJson = "JustJson"
-    WithNumber = "WithNumber"
-    LightTokens = "LightTokens"
+from formats import get_to_string_processor
 
 
 def count_parameters(model):
@@ -27,66 +22,6 @@ def count_parameters(model):
     print(f"Total parameters: {total_params:,}")
     print(f"Trainable parameters: {trainable_params:,}")
     print(f"Non-trainable parameters: {non_trainable_params:,}")
-    
-    
-def get_to_string_processor(format):
-    if format == Format.SpecTokens:
-        def json_to_string(bundles_json):
-            bundles = json.loads(bundles_json)
-            columns = ["Title", "Price", "Currency", "Count"]
-            spec_tokens = [("<BOT>", "<EOT>"), ("<BOP>", "<EOP>"), ("<BOC1>", "<EOC1>"), ("<BOC2>", "<EOC2>")]
-
-            def wrap(s, begin, end):
-                return begin + " " + s + " " + end + " "
-
-            s = "".join(
-                [wrap("".join(
-                    [wrap(str(bundle[col]), prev, post) for col, (prev, post) in zip(columns, spec_tokens)]
-                ), "<BOB>", "<EOB>") for bundle in bundles]
-            )
-            return " ".join(s.split())        
-        return json_to_string
-        
-    elif format == Format.WithNumber:
-        def json_to_string_with_number(bundles_json):
-            bundles = json.loads(bundles_json)
-            for i in range(len(bundles)):
-                bundles[i]["N"] = f"{i + 1} / {len(bundles)}"
-
-            columns = ["Title", "Price", "Currency", "Count", "N"]
-            spec_tokens = [("<BOT>", "<EOT>"), ("<BOP>", "<EOP>"), ("<BOC1>", "<EOC1>"), ("<BOC2>", "<EOC2>"), ("<BON>", "<EON>")]
-
-            def wrap(s, begin, end):
-                return begin + " " + s + " " + end + " "
-
-            s = "".join(
-                [wrap("".join(
-                    [wrap(str(bundle[col]), prev, post) for col, (prev, post) in zip(columns, spec_tokens)]
-                ), "<BOB>", "<EOB>") for bundle in bundles]
-            )
-            return " ".join(s.split())        
-        return json_to_string_with_number
-    
-    elif format == Format.LightTokens:
-        def json_to_lightweight_string(bundles_json):
-            bundles = json.loads(bundles_json)
-            columns = ["Title", "Price", "Currency", "Count"]
-            spec_tokens = ["<BOT>", "<BOP>", "<BOC1>", "<BOC2>"]
-
-            encoded_bundles = [
-                f"<BOB>{len(bundles) - 1 - i}" + "".join([f"{tok}{str(bundle[col]).lower()}" for tok, col in zip(spec_tokens, columns)])
-                    for i, bundle in enumerate(bundles)
-            ]
-            return str(len(bundles)) + "".join(encoded_bundles)
-        return json_to_lightweight_string
-
-    elif format == Format.JustJson:
-        def json_to_simple_string(bundles_json):
-            return str([{key.lower(): value for key, value in bundle.items()} for bundle in json.loads(bundles_json)])
-        return json_to_simple_string
-
-    else:
-        raise ValueError(f"Not supportef format: {format}")
         
         
 def clean_text(text):

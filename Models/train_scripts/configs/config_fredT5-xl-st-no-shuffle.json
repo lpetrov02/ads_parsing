@@ -7,9 +7,9 @@
     "add_eos_token": true,
     "add_lm_token": true,
     "change_pad_to_eos": false,
-    "shuffle_bundles": true,
+    "shuffle_bundles": false,
     "clean_text": true,
-    "save_folder": "fredT5-xl-st",
+    "save_folder": "fredT5-xl-st-no-shuf",
     "train": {
         "n_epochs": 10,
         "lr": 3e-04,

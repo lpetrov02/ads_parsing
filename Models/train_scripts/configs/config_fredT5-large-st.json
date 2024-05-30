@@ -1,9 +1,9 @@
 {
     "format": "SpecTokens",
     "max_bundles": 5,
-    "max_eval_size": 50,
+    "max_eval_size": 100,
     "model": "ai-forever/FRED-T5-large",
-    "add_nl_token": true,
+    "add_nl_token": false,
     "add_eos_token": true,
     "change_pad_to_eos": false,
     "shuffle_bundles": true,
