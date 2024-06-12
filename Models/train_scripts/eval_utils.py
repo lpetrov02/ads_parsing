@@ -87,7 +87,7 @@ def compare_currency(pred, target):
         "eur": ("е", "евро", "eur", "euro", "€",),
         "usd": ("доллар", "долларов", "доллары", "usd", "$",),
     }
-    pred, target = pred.lower().strip(".,"), target.lower().strip(".,")
+    pred, target = pred.lower().strip(".,").strip(), target.lower().strip(".,").strip()
     if pred == target:
         return True
     for curr_name in groups:

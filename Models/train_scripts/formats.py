@@ -182,6 +182,7 @@ def light_tokens_parser(sequence, tokenizer, simple=False):
         bundle_dict = {}
         for i, (tok, ind) in enumerate(inds):
             bundle_dict[tok2name[tok]] = bundle[ind + len(tok): inds[i + 1][1]] if i < len(inds) - 1 else bundle[ind + len(tok):]
+            bundle_dict[tok2name[tok]] = bundle_dict[tok2name[tok]].strip()
         bundles.append(bundle_dict)
     return True, bundles
 
