@@ -1,0 +1,23 @@
+{
+    "format": "LightTokens",
+    "max_bundles": 10,
+    "max_eval_size": 100,
+    "model": "cointegrated/ruT5-small",
+    "add_nl_token": false,
+    "add_eos_token": false,
+    "change_pad_to_eos": false,
+    "shuffle_bundles": true,
+    "save_folder": "cointegrated-distil-lt",
+    "train": {
+        "n_epochs": 10,
+        "lr": 5e-4,
+        "batch_size": 64,
+        "weight_decay": 0.01,
+        "scheduler": "cosine",
+        "warmup_steps": 300
+    },
+    "eval": {
+        "batch_size": 64,
+        "show": 5
+    }
+}
